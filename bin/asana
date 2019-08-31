@@ -3,7 +3,332 @@
 use strict;
 use warnings;
 
-use WebService::Asana::REPL;
+# ----- App::Asana::History ----------------------------------------------------
+package App::Asana::History;
+use Moo;
+use Path::Tiny;
 
-my $repl = WebService::Asana::REPL->new;
-$repl->run;
+# SYNOPSIS
+#     my $history = App::Asana::History->new;
+#     $history->update('organization' => 'DuckDuckGo');
+
+has data => (is => 'lazy', builder => 1); 
+has max_history_size => (is => 'rw', default => '20');
+
+sub _build_data {
+    my $data = {}; 
+    for my $name (qw/organization team project task workspace/) {
+        my $file = path($ENV{HOME} . "/.asana/${name}_history");
+        $file->touchpath;
+        my @history = $file->lines({ chomp => 1 });
+        $data->{$name} = [@history];
+    }   
+    return $data;
+}
+
+sub current {
+    my ($self, $name) = @_;   
+    return $self->data->{$name}->[0];
+}
+
+sub update {
+    my ($self, $name, $value) = @_; 
+
+    # update history
+    my $listref = $self->data->{$name};
+    unshift @$listref, $value;
+    pop @$listref if @$listref > $self->max_history_size;
+
+    # save history to a file
+    my $file = path($ENV{HOME} . "/.asana/${name}_history")->touchpath;
+    my @list = map { $_ . "\n"} @$listref;
+    $file->spew(@list);
+
+    return $listref;
+}
+1;
+
+# ----- App::Asana ---------------------------------------------------
+package App::Asana;
+use Moo;
+
+use Term::ANSIColor;
+use WebService::Asana;
+use DDP;
+
+has token   => (is => 'lazy', builder => 1);
+has asana   => (is => 'lazy', builder => 1);
+has history => (is => 'lazy', builder => 1);
+
+sub _build_token {
+    return $ENV{WEBSERVICE_ASANA_TOKEN} ||
+    die "Environment variable \$WEBSERVICE_ASANA_TOKEN is required";
+}
+sub _build_asana   { WebService::Asana->new(token => shift->token) }
+sub _build_history { App::Asana::History->new }
+
+# CMDs ----------------------------------
+
+sub CMD_help {
+    usage();
+}
+
+sub CMD_workspace {
+    my ($self, $cmd, @args) = @_;
+    my $subcmd = "CMD_workspace_$cmd";
+    $self->$subcmd(@args);
+}
+
+sub CMD_workspace_list {
+    my ($self) = @_;
+    my $data = $self->asana->get("/workspaces");
+    $self->display_data($data);
+}
+
+sub CMD_workspace_select {
+    my ($self) = @_;
+    my $workspace_id = $self->select('workspace');
+    $self->history->update(workspace => $workspace_id);
+}
+
+sub CMD_team {
+    my ($self, $cmd, @args) = @_;
+    my $subcmd = "CMD_team_$cmd";
+    $self->$subcmd(@args);
+}
+
+sub CMD_team_select {
+    my ($self) = @_;
+    my $team_id = $self->select('team');
+    $self->history->update(team => $team_id);
+}
+
+sub CMD_team_list {
+    my ($self, $workspace_id) = @_;
+    $workspace_id ||= $self->history->current('workspace') || $self->select('workspace');
+    my $data = $self->asana->get("/organizations/$workspace_id/teams");
+    $self->display_data($data);
+    $self->history->update(workspace => $workspace_id);
+}
+
+sub CMD_team_members {
+    my ($self, $team_id) = @_;
+    $team_id ||= $self->history->current('team') || $self->select('team');
+    my $data = $self->asana->get("/teams/$team_id/users");
+    $self->display_data($data);
+    $self->history->update(team => $team_id);
+}
+
+sub CMD_project {
+    my ($self, $cmd, @args) = @_;
+    my $subcmd = "CMD_project_$cmd";
+    $self->$subcmd(@args);
+}
+
+sub CMD_project_select {
+    my ($self) = @_;
+    my $project_id = $self->select('project');
+    $self->history->update(project => $project_id);
+}
+
+sub CMD_project_list {
+    my ($self, $team_id) = @_;
+    $team_id ||= $self->history->current('team') || $self->select('team');
+    my $data = $self->asana->get("/teams/$team_id/projects", { archived => 0 });
+    $self->display_data($data);
+    $self->history->update(team => $team_id);
+}
+
+sub CMD_project_followers {
+    my ($self, $project_id) = @_;
+    $project_id ||= $self->history->current('project') || $self->select('project');
+    my $data = $self->asana->get("/projects/$project_id/followers");
+    $self->display_data($data);
+    $self->history->update(project => $project_id);
+}
+
+sub CMD_project_members {
+    my ($self, $project_id) = @_;
+    $project_id ||= $self->history->current('project') || $self->select('project');
+    my $data = $self->asana->get("/projects/$project_id/project_memberships");
+use DDP;
+p $data;
+    $self->display_select_data('user', $data);
+    $self->history->update(project => $project_id);
+}
+
+sub CMD_task {
+    my ($self, $cmd, @args) = @_;
+    my $subcmd = "CMD_task_$cmd";
+    $self->$subcmd(@args);
+}
+
+sub CMD_task_select {
+    my ($self) = @_;
+    my $task_id = $self->select('task');
+    $self->history->update(task => $task_id);
+}
+
+sub CMD_task_list {
+    my ($self, $project_id) = @_;
+    $project_id ||= $self->history->current('project') || $self->select('project');
+    my $data = $self->asana->get("/projects/$project_id/tasks", { completed_since => 'now' });
+    $self->display_data($data);
+    $self->history->update(project => $project_id);
+}
+
+sub CMD_task_info {
+    my ($self, $task_id) = @_;
+    $task_id ||= $self->history->current('task') || $self->select('task');
+    my $data = $self->asana->get("/tasks/$task_id");
+    $self->history->update(task => $task_id);
+
+    p $data;
+}
+
+sub CMD_task_changeSection {
+    my ($self, $section_id) = @_;
+
+    my $task_id = $self->history->current('task');
+    my $project_id = $self->history->current('project');
+
+    my $in = $self->asana->get("/tasks/$task_id");
+
+    my $out = { 
+        project      => $self->history->current('project'),
+        insert_after => $section_id,
+    };
+    $self->asana->post("/tasks/$task_id/addProject", $data);
+
+    p $data;
+}
+
+# Utils ---------------------------------
+
+sub select {
+    my ($self, $thing) = @_;
+    print "Select a default $thing:\n";
+    my $line = `bin/asana $thing list | fzf`;
+    print $line;
+    chomp $line;
+    die "something went wrong" unless $line =~ m/^(\d+)/;
+    return $1;
+}
+
+sub display_select_data {
+    my ($self, $key, $list) = @_;
+    my @things;
+    for my $item (@$list) {
+        push @things, $item->{$key};
+    }
+
+    $self->display_data(\@things);
+}
+
+sub display_data {
+    my ($self, $list) = @_;
+    for my $item (@$list) {
+        delete $item->{gid};
+        delete $item->{resource_type};
+
+        my @keys = sort keys %$item;
+        my $count = scalar @keys;
+        my $fmt = "%-16s  " . "%-16s  "x($count - 1) . "\n";
+
+        my $header;
+        my @values;
+        for my $key (@keys) {
+            $header = 1 if ($key eq "name" && $item->{name} =~ /:$/);
+            push @values, $item->{$key};
+        }
+
+        my $fmt2 = $header 
+            ? $fmt
+            : "%-16s     " . "%-20s  "x($count - 1) . "\n" ;
+        print sprintf $fmt2, @values;
+    }
+}
+
+# Usage ---------------------------------
+
+sub usage {
+    print <<EOF;
+usage: asana <command>... [<options>]
+
+TASKS
+asana task list [<project_id>]   List the tasks in a project
+asana task info [<task_id>]      Show basic task info
+asana task desc [<task_id>]      Show task description
+asana task comments [<task_id>]  Show comments on a task
+
+asana task select [<project_id>]  Select a default task
+asana task create <title>         Create a new task
+asana task edit [<task_id>]       Edit task description
+asana task like [<task_id>]
+asana task unlike [<task_id>]
+asana task comment [<task_id>]
+asana task changeSection [<section_id>]
+
+PROJECTS
+asana task list [<project_id>]  List the tasks in a project
+asana project list [<team_id>]
+asana project select [<team_id>]
+asana project create <name>
+asana project followers [<project_id>]
+asana project members [<project_id>]
+
+TEAMS
+asana team list [<workspace_id>]
+asana team select [<workspace_id>]
+asana team members [<team_id>]
+
+WORKSPACES
+asana workspace list
+asana workspace select
+
+asana comment like
+asana comment edit
+asana comment delete
+
+HELP
+asana help <command>     Show help for a given command
+asana help               Show this help screen
+
+EOF
+}
+1;
+
+# ----- main ------------------------------------------------------------------
+package main;
+use strict;
+use warnings;
+
+use Syntax::Keyword::Junction qw/any/;
+use App::Asana;
+
+my $VERSION = 1.0;
+
+sub dispatch {
+    my (%params) = @_;
+    my $argv = [@{ $params{argv} }]; # make a copy of the array
+
+    (print($VERSION, "\n") && exit 1)
+        if $argv->[0]
+        && $argv->[0] eq any(qw/-v --version/);
+
+    unshift @$argv, 'help' if $argv->[0] && $argv->[0] eq any(qw/-h --help/);
+    unshift @$argv, 'help' unless $argv->[0];
+
+    my @args;
+    while (my $arg = shift @$argv) {
+        last if $arg =~ /^--?/;
+        push @args, $arg;
+    }
+
+    my $cmd = "CMD_" . shift @args;
+    my $cli = App::Asana->new;
+    die "Unknown command $cmd\n" unless $cli->can($cmd);
+    $cli->$cmd(@args);
+}
+
+dispatch(argv => [@ARGV]);

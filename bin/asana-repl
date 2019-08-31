@@ -1,0 +1,9 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+use WebService::Asana::REPL;
+
+my $repl = WebService::Asana::REPL->new;
+$repl->run;
